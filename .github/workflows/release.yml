@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Get version
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build Linux AMD64
+      run: |
+        GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o cosmos-docker-upgrader-linux-amd64 ./cmd/cosmos-docker-upgrader
+        chmod +x cosmos-docker-upgrader-linux-amd64
+
+    - name: Build macOS ARM64
+      run: |
+        GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o cosmos-docker-upgrader-darwin-arm64 ./cmd/cosmos-docker-upgrader
+        chmod +x cosmos-docker-upgrader-darwin-arm64
+
+    - name: Create checksums
+      run: |
+        sha256sum cosmos-docker-upgrader-linux-amd64 > checksums.txt
+        sha256sum cosmos-docker-upgrader-darwin-arm64 >> checksums.txt
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          cosmos-docker-upgrader-linux-amd64
+          cosmos-docker-upgrader-darwin-arm64
+          checksums.txt
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
