@@ -35,9 +35,6 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
-          echo "we are here"
-          pwd
-          find ..
           go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o cosmos-docker-upgrader-linux-amd64 ./cmd/cosmos-docker-upgrader
           chmod +x cosmos-docker-upgrader-linux-amd64
 

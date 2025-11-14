@@ -15,12 +15,12 @@
 # vendor/
 
 # Go workspace file
-go.work
+/go.work
 
 # Build artifacts
-cosmos-docker-upgrader
-cosmos-docker-upgrader-*
-checksums.txt
+/cosmos-docker-upgrader
+/cosmos-docker-upgrader-*
+/checksums.txt
 
 # IDE files
 .vscode/
