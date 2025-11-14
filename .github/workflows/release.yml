@@ -35,6 +35,8 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
+          pwd
+          cd ..
           go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o cosmos-docker-upgrader-linux-amd64 ./cmd/cosmos-docker-upgrader
           chmod +x cosmos-docker-upgrader-linux-amd64
 
@@ -44,6 +46,8 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
         run: |
+          pwd
+          cd ..
           go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" -o cosmos-docker-upgrader-darwin-arm64 ./cmd/cosmos-docker-upgrader
           chmod +x cosmos-docker-upgrader-darwin-arm64
 
