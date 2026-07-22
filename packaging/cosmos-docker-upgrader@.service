@@ -1,0 +1,22 @@
+[Unit]
+Description=Cosmos Docker Upgrader for %i
+Documentation=https://github.com/streamingfast/cosmos-docker-upgrader
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+# One env file per instance, see /usr/share/cosmos-docker-upgrader/example.env
+EnvironmentFile=/etc/cosmos-docker-upgrader/%i.env
+
+# The dollar signs are doubled so systemd passes them through and bash does the
+# expansion, keeping quoting and defaults in one place.
+ExecStart=/bin/bash -c 'exec /usr/bin/cosmos-docker-upgrader "$$CHAIN_FOLDER" "$$DATA_FOLDER" $$EXTRA_FLAGS 2>&1 | /usr/bin/rotatelogs -n "$${LOG_ROTATE_COUNT:-5}" "$$LOG_FILE" "$${LOG_ROTATE_SIZE:-1M}"'
+
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

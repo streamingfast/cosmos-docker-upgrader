@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,12 +26,7 @@ var (
 var zlog, _ = logging.PackageLogger("upgrader", "github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader")
 
 func main() {
-	// INFO by default so the status lines are always visible, DLOG still takes
-	// precedence for turning individual loggers up or down.
-	logging.InstantiateLoggers(
-		logging.WithDefaultLevel(zap.InfoLevel),
-		logging.WithConsoleToStdout(),
-	)
+	instantiateLoggers()
 
 	config := upgrader.Config{}
 
@@ -75,6 +71,30 @@ A status line is logged at startup, on every state change and on a heartbeat
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// instantiateLoggers sets up logging before anything else runs. The format is
+// read from the environment rather than a flag so it is settled before cobra
+// parses anything, which also makes it settable from the systemd instance env
+// file.
+//
+// The format is pinned explicitly because the library otherwise picks JSON when
+// it detects a container, and this tool is meant to be tailed from a log file.
+func instantiateLoggers() {
+	// INFO by default so the status lines are always visible, DLOG still takes
+	// precedence for turning individual loggers up or down.
+	options := []logging.InstantiateOption{logging.WithDefaultLevel(zap.InfoLevel)}
+
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		options = append(options, logging.WithProductionLogger())
+	} else {
+		options = append(options,
+			logging.WithProductionDetector(func() bool { return false }),
+			logging.WithConsoleToStdout(),
+		)
+	}
+
+	logging.InstantiateLoggers(options...)
 }
 
 func run(ctx context.Context, config upgrader.Config) error {

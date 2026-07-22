@@ -18,31 +18,80 @@ This tool monitors a data directory for the appearance of `upgrade-info.json` fi
 
 ## Installation
 
-### Option 1: Download Pre-built Binaries
+### Option 1: Debian Package (recommended on Ubuntu)
 
-Download the latest release for your platform from the [releases page](https://github.com/your-username/cosmos-docker-upgrader/releases):
+Each release publishes a `.deb` for `amd64` and `arm64`. It installs the binary to
+`/usr/bin/cosmos-docker-upgrader` and a systemd template unit, so one host can run
+one instance per chain.
+
+```bash
+version=1.0.0
+curl -L -O https://github.com/streamingfast/cosmos-docker-upgrader/releases/download/v${version}/cosmos-docker-upgrader_${version}_amd64.deb
+sudo apt install ./cosmos-docker-upgrader_${version}_amd64.deb
+```
+
+Then configure an instance and start it. The instance name is whatever you put after
+the `@`, and it selects the matching env file:
+
+```bash
+sudo cp /usr/share/cosmos-docker-upgrader/example.env \
+        /etc/cosmos-docker-upgrader/injective-evm-testnet.env
+sudo editor /etc/cosmos-docker-upgrader/injective-evm-testnet.env
+
+sudo systemctl enable --now cosmos-docker-upgrader@injective-evm-testnet
+```
+
+The unit pipes output through `rotatelogs` to the `LOG_FILE` set in the env file.
+Install `apache2-utils` if it is not already present, it provides `rotatelogs`.
+
+#### With Ansible
+
+```yaml
+- name: Install cosmos-docker-upgrader
+  ansible.builtin.apt:
+    deb: "https://github.com/streamingfast/cosmos-docker-upgrader/releases/download/v{{ cdu_version }}/cosmos-docker-upgrader_{{ cdu_version }}_{{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}.deb"
+
+- name: Configure the instance
+  ansible.builtin.template:
+    src: cosmos-docker-upgrader.env.j2
+    dest: "/etc/cosmos-docker-upgrader/{{ chain_name }}.env"
+  notify: Restart cosmos-docker-upgrader
+
+- name: Enable the instance
+  ansible.builtin.systemd_service:
+    name: "cosmos-docker-upgrader@{{ chain_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+```
+
+### Option 2: Download Pre-built Binaries
+
+Download the latest release from the [releases page](https://github.com/streamingfast/cosmos-docker-upgrader/releases):
 
 - **Linux AMD64**: `cosmos-docker-upgrader-linux-amd64`
+- **Linux ARM64**: `cosmos-docker-upgrader-linux-arm64`
 - **macOS ARM64**: `cosmos-docker-upgrader-darwin-arm64`
 
 ```bash
 # Example for Linux AMD64
-curl -L -o cosmos-docker-upgrader https://github.com/your-username/cosmos-docker-upgrader/releases/latest/download/cosmos-docker-upgrader-linux-amd64
+curl -L -o cosmos-docker-upgrader https://github.com/streamingfast/cosmos-docker-upgrader/releases/latest/download/cosmos-docker-upgrader-linux-amd64
 chmod +x cosmos-docker-upgrader
 ```
 
-### Option 2: Build from Source
+### Option 3: Build from Source
 
-1. Clone this repository:
-   ```bash
-   git clone <repository-url>
-   cd cosmos-docker-upgrader
-   ```
+```bash
+go install github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader@latest
+```
 
-2. Build the program:
-   ```bash
-   go build -o cosmos-docker-upgrader ./cmd/cosmos-docker-upgrader
-   ```
+Or reproduce a release binary exactly, which builds it in a container and writes it
+to `dist/`:
+
+```bash
+docker buildx build --target binary --output type=local,dest=dist \
+  --build-arg GOOS=linux --build-arg GOARCH=amd64 .
+```
 
 ## Usage
 
@@ -149,6 +198,10 @@ already staged `docker-compose.yml-next`, and all errors with the recovery taken
 
 Set `DLOG=upgrader=debug` for verbose filesystem event logging.
 
+Set `LOG_FORMAT=json` for structured JSON output instead, if you ship logs to an
+aggregator. The format is pinned rather than auto-detected, so it does not change
+when the tool runs inside a container.
+
 ## Error Handling
 
 - Validates directories and required files on startup
@@ -173,28 +226,34 @@ Set `DLOG=upgrader=debug` for verbose filesystem event logging.
 
 ## Releases
 
-This project uses GitHub Actions to automatically build and release binaries when tags are pushed. The workflow:
+Releases are built by GitHub Actions when a `v*` tag is pushed. Every binary is
+built inside a container from `Dockerfile`, so a release artifact can be reproduced
+locally with the same command the workflow runs.
 
-- Triggers on version tags (e.g., `v1.0.0`, `v1.2.3`)
-- Builds binaries for Linux AMD64 and macOS ARM64
-- Creates GitHub releases with binaries and checksums
-- Includes auto-generated release notes
+Three build jobs run in parallel, each on a native runner:
+
+| Job | Runner | Produces |
+| --- | --- | --- |
+| `linux/amd64` | `ubuntu-24.04` | binary + `.deb` |
+| `linux/arm64` | `ubuntu-24.04-arm` | binary + `.deb` |
+| `darwin/arm64` | `ubuntu-24.04` | binary |
+
+The builder stage always runs on the native platform and cross compiles, so no
+emulation is involved. Each Linux job installs the `.deb` it just built as a smoke
+test. A final job collects every artifact, writes `checksums.txt` and creates the
+GitHub release.
+
+The workflow also runs on pull requests, without publishing, so packaging breakage
+is caught before tagging.
 
 ### Creating a Release
 
-To create a new release:
-
-1. Tag the commit:
+1. Update `CHANGELOG.md`, moving the `Unreleased` section under the new version.
+2. Tag and push:
    ```bash
    git tag v1.0.0
    git push origin v1.0.0
    ```
-
-2. The GitHub Actions workflow will automatically:
-   - Build the binaries
-   - Create checksums
-   - Create a GitHub release
-   - Upload the artifacts
 
 ## License
 

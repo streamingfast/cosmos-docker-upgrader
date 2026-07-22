@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Publish a `.deb` package for `amd64` and `arm64` on every release. It installs the binary to `/usr/bin` along with a `cosmos-docker-upgrader@.service` systemd template unit, so one host can run one instance per chain, configured from `/etc/cosmos-docker-upgrader/<instance>.env`. Installable directly from the release URL with Ansible's `apt` module.
+- Publish a `linux/arm64` binary in addition to `linux/amd64` and `darwin/arm64`.
+- Build every release artifact inside a container from a `Dockerfile`, so binaries can be reproduced locally with the same command the workflow runs.
+- Add `LOG_FORMAT=json` for structured JSON output. The format is now pinned rather than auto-detected, so it no longer silently switches to JSON when running inside a container.
 - Log a clear status line whenever `docker-compose.yml-next` is staged, so it is immediately visible in the log that the upgrade was seen and is armed.
 - Add a status heartbeat, logged at startup, on every state change and every hour by default. Configure with `--status-interval`, `0` disables it. The heartbeat timer resets on every status line, so an event never produces a duplicate heartbeat right after it.
 - Watch the chain folder in addition to the data folder, so staging `docker-compose.yml-next` is noticed right away instead of only when the chain halts.
