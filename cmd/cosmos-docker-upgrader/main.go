@@ -25,6 +25,13 @@ var (
 var zlog, _ = logging.PackageLogger("upgrader", "github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader")
 
 func main() {
+	// INFO by default so the status lines are always visible, DLOG still takes
+	// precedence for turning individual loggers up or down.
+	logging.InstantiateLoggers(
+		logging.WithDefaultLevel(zap.InfoLevel),
+		logging.WithConsoleToStdout(),
+	)
+
 	config := upgrader.Config{}
 
 	rootCmd := &cobra.Command{
@@ -48,13 +55,6 @@ A status line is logged at startup, on every state change and on a heartbeat
 		Args:         cobra.ExactArgs(2),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// INFO by default so the status lines are always visible, DLOG still
-			// takes precedence for turning individual loggers up or down.
-			logging.InstantiateLoggers(
-				logging.WithDefaultLevel(zap.InfoLevel),
-				logging.WithConsoleToStdout(),
-			)
-
 			config.ChainFolder = args[0]
 			config.DataFolder = args[1]
 
