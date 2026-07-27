@@ -49,3 +49,6 @@ Thumbs.db
 # Test directories
 test-chain/
 test-data/
+
+build/
+dist/
