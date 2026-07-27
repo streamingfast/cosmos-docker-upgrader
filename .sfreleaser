@@ -1,0 +1,4 @@
+global:
+  binary: cosmos-docker-upgrader
+  language: golang
+  variant: application
