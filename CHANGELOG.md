@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Fixed
+
+- Stop attaching the `*.dockerbuild` build records produced by `docker/build-push-action` to the GitHub release, only the binaries, `.deb` packages and `checksums.txt` are published now.
+
 ## v1.0.0
 
 ### Added

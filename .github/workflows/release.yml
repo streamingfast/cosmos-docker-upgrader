@@ -136,10 +136,14 @@ jobs:
       contents: write
 
     steps:
+      # docker/build-push-action uploads a build record artifact of its own
+      # (<owner>.<repo>.<id>.dockerbuild), so the pattern is required to keep it
+      # out of the release assets.
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+          pattern: cosmos-docker-upgrader-*
           merge-multiple: true
 
       - name: Create checksums
