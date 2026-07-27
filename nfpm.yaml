@@ -1,0 +1,49 @@
+# nfpm configuration for the .deb package, see https://nfpm.goreleaser.com
+#
+# PKG_VERSION and PKG_ARCH are provided by the release workflow:
+#
+#   PKG_VERSION=1.2.3 PKG_ARCH=amd64 nfpm package --packager deb --target dist
+
+name: cosmos-docker-upgrader
+arch: ${PKG_ARCH}
+platform: linux
+version: ${PKG_VERSION}
+section: utils
+priority: optional
+maintainer: StreamingFast <contact@streamingfast.io>
+vendor: StreamingFast
+homepage: https://github.com/streamingfast/cosmos-docker-upgrader
+license: Apache-2.0
+description: |
+  Watches for Cosmos chain upgrade signals and swaps Docker Compose files.
+  Detects docker-compose.yml-next being staged and upgrade-info.json being
+  written by the chain, then stops the containers, promotes the staged compose
+  file and starts them again.
+
+# rotatelogs ships in apache2-utils and is used by the shipped systemd unit.
+recommends:
+  - apache2-utils
+
+contents:
+  - src: ./dist/cosmos-docker-upgrader
+    dst: /usr/bin/cosmos-docker-upgrader
+    file_info:
+      mode: 0755
+
+  - src: ./packaging/cosmos-docker-upgrader@.service
+    dst: /lib/systemd/system/cosmos-docker-upgrader@.service
+
+  # Deliberately not under /usr/share/doc: minimal images, including the official
+  # Ubuntu ones, configure dpkg with path-exclude=/usr/share/doc/* and would strip
+  # this file on install even though dpkg still reports it as installed.
+  - src: ./packaging/example.env
+    dst: /usr/share/cosmos-docker-upgrader/example.env
+
+  # Instance env files live here, one per chain.
+  - dst: /etc/cosmos-docker-upgrader
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: ./packaging/postinstall.sh

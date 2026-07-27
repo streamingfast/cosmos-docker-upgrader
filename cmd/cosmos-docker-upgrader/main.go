@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/streamingfast/cosmos-docker-upgrader/internal/upgrader"
+
 	"github.com/spf13/cobra"
+	"github.com/streamingfast/logging"
+	"go.uber.org/zap"
 )
 
 var (
@@ -19,17 +23,14 @@ var (
 	GitCommit = "unknown"
 )
 
-const (
-	upgradeInfoFile     = "upgrade-info.json"
-	dockerComposeFile   = "docker-compose.yml"
-	dockerComposeNext   = "docker-compose.yml-next"
-	dockerComposeBackup = "docker-compose.yml-backup"
-)
+var zlog, _ = logging.PackageLogger("upgrader", "github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader")
 
 func main() {
-	var chainFolder, dataFolder string
+	instantiateLoggers()
 
-	var rootCmd = &cobra.Command{
+	config := upgrader.Config{}
+
+	rootCmd := &cobra.Command{
 		Use:     "cosmos-docker-upgrader <ChainFolder> <DataFolder>",
 		Short:   "Cosmos Docker Upgrader - Watches for upgrade-info.json and manages Docker Compose upgrades",
 		Version: fmt.Sprintf("%s (built: %s, commit: %s)", Version, BuildTime, GitCommit),
@@ -40,161 +41,73 @@ Parameters:
   <ChainFolder>: Directory containing docker-compose.yml and docker-compose.yml-next files
   <DataFolder>:  Directory to watch for upgrade-info.json file appearances
 
-When upgrade-info.json appears:
-- If docker-compose.yml-next exists: performs upgrade (down, backup, swap, up)
-- If docker-compose.yml-next missing: logs the event only`,
-		Args: cobra.ExactArgs(2),
-		Run: func(cmd *cobra.Command, args []string) {
-			chainFolder = args[0]
-			dataFolder = args[1]
-			runWatcher(chainFolder, dataFolder)
+Both folders are watched. The upgrade runs when docker-compose.yml-next and
+upgrade-info.json are both present, in whichever order they appear. After a
+successful upgrade, upgrade-info.json is renamed to upgrade-info.json-applied so
+a later staged compose file does not trigger on a stale signal.
+
+A status line is logged at startup, on every state change and on a heartbeat
+(see --status-interval). Set DLOG=upgrader=debug for verbose file event logging.`,
+		Args:         cobra.ExactArgs(2),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config.ChainFolder = args[0]
+			config.DataFolder = args[1]
+
+			return run(cmd.Context(), config)
 		},
 	}
 
-	if err := rootCmd.Execute(); err != nil {
+	flags := rootCmd.Flags()
+	flags.DurationVar(&config.StatusInterval, "status-interval", time.Hour, "How often to log a status line, 0 disables the heartbeat")
+	flags.DurationVar(&config.PollInterval, "poll-interval", 30*time.Second, "How often to re-check both folders in case a filesystem event was missed, 0 disables polling")
+	flags.DurationVar(&config.RetryInterval, "retry-interval", 5*time.Minute, "How long to wait before retrying a failed upgrade, restaging docker-compose.yml-next retries immediately")
+	flags.DurationVar(&config.DebounceDelay, "debounce-delay", 500*time.Millisecond, "How long to wait after a filesystem event before acting, to let the file be fully written")
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func runWatcher(chainFolder, dataFolder string) {
-	log.Printf("Starting Cosmos Docker Upgrader %s", Version)
-	log.Printf("Chain folder: %s", chainFolder)
-	log.Printf("Data folder: %s", dataFolder)
+// instantiateLoggers sets up logging before anything else runs. The format is
+// read from the environment rather than a flag so it is settled before cobra
+// parses anything, which also makes it settable from the systemd instance env
+// file.
+//
+// The format is pinned explicitly because the library otherwise picks JSON when
+// it detects a container, and this tool is meant to be tailed from a log file.
+func instantiateLoggers() {
+	// INFO by default so the status lines are always visible, DLOG still takes
+	// precedence for turning individual loggers up or down.
+	options := []logging.InstantiateOption{logging.WithDefaultLevel(zap.InfoLevel)}
 
-	// Validate directories exist
-	if err := validateDirectories(chainFolder, dataFolder); err != nil {
-		log.Fatalf("Validation failed: %v", err)
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		options = append(options, logging.WithProductionLogger())
+	} else {
+		options = append(options,
+			logging.WithProductionDetector(func() bool { return false }),
+			logging.WithConsoleToStdout(),
+		)
 	}
 
-	// Create file watcher
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatalf("Failed to create watcher: %v", err)
-	}
-	defer watcher.Close()
-
-	// Add data folder to watcher
-	err = watcher.Add(dataFolder)
-	if err != nil {
-		log.Fatalf("Failed to add data folder to watcher: %v", err)
-	}
-
-	log.Printf("Watching for %s in %s", upgradeInfoFile, dataFolder)
-
-	// Watch for file events
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				filename := filepath.Base(event.Name)
-				if filename == upgradeInfoFile {
-					log.Printf("Detected %s file event: %s", upgradeInfoFile, event.Op)
-					handleUpgradeFile(chainFolder, dataFolder)
-				}
-			}
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("Watcher error: %v", err)
-		}
-	}
+	logging.InstantiateLoggers(options...)
 }
 
-func validateDirectories(chainFolder, dataFolder string) error {
-	// Check if chain folder exists
-	if _, err := os.Stat(chainFolder); os.IsNotExist(err) {
-		return fmt.Errorf("chain folder does not exist: %s", chainFolder)
-	}
+func run(ctx context.Context, config upgrader.Config) error {
+	zlog.Info("starting cosmos-docker-upgrader",
+		zap.String("version", Version),
+		zap.String("build_time", BuildTime),
+		zap.String("git_commit", GitCommit),
+		zap.String("chain_folder", config.ChainFolder),
+		zap.String("data_folder", config.DataFolder),
+		zap.Duration("status_interval", config.StatusInterval),
+		zap.Duration("poll_interval", config.PollInterval),
+		zap.Duration("retry_interval", config.RetryInterval),
+	)
 
-	// Check if data folder exists
-	if _, err := os.Stat(dataFolder); os.IsNotExist(err) {
-		return fmt.Errorf("data folder does not exist: %s", dataFolder)
-	}
-
-	// Check if docker-compose.yml exists in chain folder
-	dockerComposePath := filepath.Join(chainFolder, dockerComposeFile)
-	if _, err := os.Stat(dockerComposePath); os.IsNotExist(err) {
-		return fmt.Errorf("docker-compose.yml not found in chain folder: %s", dockerComposePath)
-	}
-
-	log.Printf("Validation passed - both directories exist and docker-compose.yml found")
-	return nil
-}
-
-func handleUpgradeFile(chainFolder, dataFolder string) {
-	// Wait a brief moment for file to be fully written
-	time.Sleep(100 * time.Millisecond)
-
-	// Check if docker-compose.yml-next exists
-	nextComposePath := filepath.Join(chainFolder, dockerComposeNext)
-	if _, err := os.Stat(nextComposePath); os.IsNotExist(err) {
-		log.Printf("No %s file found - upgrade skipped", dockerComposeNext)
-		return
-	}
-
-	log.Printf("Found %s - proceeding with upgrade", dockerComposeNext)
-
-	if err := performUpgrade(chainFolder); err != nil {
-		log.Printf("Upgrade failed: %v", err)
-		return
-	}
-
-	log.Printf("Upgrade completed successfully")
-}
-
-func performUpgrade(chainFolder string) error {
-	log.Printf("Starting Docker Compose upgrade sequence")
-
-	// Step 1: docker-compose down
-	log.Printf("Step 1: Stopping containers with docker-compose down")
-	if err := runCommand(chainFolder, "docker-compose", "down"); err != nil {
-		return fmt.Errorf("failed to stop containers: %v", err)
-	}
-
-	// Step 2: Backup current docker-compose.yml
-	currentPath := filepath.Join(chainFolder, dockerComposeFile)
-	backupPath := filepath.Join(chainFolder, dockerComposeBackup)
-
-	log.Printf("Step 2: Backing up current docker-compose.yml to docker-compose.yml-backup")
-	if err := os.Rename(currentPath, backupPath); err != nil {
-		return fmt.Errorf("failed to backup docker-compose.yml: %v", err)
-	}
-
-	// Step 3: Move docker-compose.yml-next to docker-compose.yml
-	nextPath := filepath.Join(chainFolder, dockerComposeNext)
-
-	log.Printf("Step 3: Promoting docker-compose.yml-next to docker-compose.yml")
-	if err := os.Rename(nextPath, currentPath); err != nil {
-		// Try to restore backup if this fails
-		log.Printf("Failed to promote next compose file, attempting to restore backup")
-		if restoreErr := os.Rename(backupPath, currentPath); restoreErr != nil {
-			return fmt.Errorf("failed to promote next compose file AND failed to restore backup: %v, restore error: %v", err, restoreErr)
-		}
-		return fmt.Errorf("failed to promote docker-compose.yml-next: %v", err)
-	}
-
-	// Step 4: docker-compose up -d
-	log.Printf("Step 4: Starting containers with docker-compose up -d")
-	if err := runCommand(chainFolder, "docker-compose", "up", "-d"); err != nil {
-		return fmt.Errorf("failed to start containers: %v", err)
-	}
-
-	return nil
-}
-
-func runCommand(workDir, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = workDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	log.Printf("Running command in %s: %s %v", workDir, name, args)
-	return cmd.Run()
+	return upgrader.New(config, upgrader.ExecRunner{}).Run(ctx)
 }
