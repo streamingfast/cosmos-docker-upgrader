@@ -13,7 +13,9 @@ This tool monitors a data directory for the appearance of `upgrade-info.json` fi
 - Clears the upgrade signal once applied, so a stale `upgrade-info.json` never triggers a later staged compose file
 - Structured logging with a status line at startup, on every state change and on an hourly heartbeat
 - Polls as a safety net for filesystem events that are silently missed
-- Safe upgrade process with backup creation and rollback on failure
+- Detects and clears an `upgrade-info.json` the node is already past (with `--rpc-url`), left behind by an upgrade applied by hand or by an older upgrader
+- Pulls the staged images before stopping anything, so a missing image never takes the chain down
+- Safe upgrade process with backup creation, and rollback of the compose files when the new containers fail to start
 - Retries a failed upgrade instead of giving up
 
 ## Installation
@@ -112,6 +114,9 @@ docker buildx build --target binary --output type=local,dest=dist \
 | `--poll-interval` | `30s` | How often to re-check both folders in case a filesystem event was missed, `0` disables polling |
 | `--retry-interval` | `5m` | How long to wait before retrying a failed upgrade, restaging `docker-compose.yml-next` retries immediately |
 | `--debounce-delay` | `500ms` | How long to wait after a filesystem event before acting, to let the file be fully written |
+| `--rpc-url` | | CometBFT RPC of the node, e.g. `http://localhost:26657`, enables stale signal detection (see below) |
+| `--pre-pull` | `true` | Pull the images of `docker-compose.yml-next` before stopping the chain |
+| `--restart-previous-on-failure` | `false` | Start the previous containers again when the upgraded ones fail to start |
 
 ### Help
 
@@ -147,18 +152,41 @@ The program reports one of these states in every status line:
 
 When `docker-compose.yml-next` and `upgrade-info.json` are both present, the program executes:
 
-1. `docker-compose down` - Stop all containers
-2. `mv docker-compose.yml docker-compose.yml-backup` - Backup current config
-3. `mv docker-compose.yml-next docker-compose.yml` - Promote new config
-4. `docker-compose up -d` - Start containers with new config
-5. `mv upgrade-info.json upgrade-info.json-applied` - Clear the upgrade signal
+1. `docker-compose -f docker-compose.yml-next pull` - Pull the new images, skipped with `--pre-pull=false`
+2. `docker-compose down` - Stop all containers
+3. `mv docker-compose.yml docker-compose.yml-backup` - Backup current config
+4. `mv docker-compose.yml-next docker-compose.yml` - Promote new config
+5. `docker-compose up -d` - Start containers with new config
+6. `mv upgrade-info.json upgrade-info.json-applied` - Clear the upgrade signal
 
 Order does not matter. Staging `docker-compose.yml-next` after the chain has already
 halted works and upgrades immediately.
 
-Step 5 is what keeps a stale signal from firing the next upgrade prematurely. It only
+Step 6 is what keeps a stale signal from firing the next upgrade prematurely. It only
 runs on success, so a failed upgrade stays armed and is retried after `--retry-interval`,
 or immediately if you restage `docker-compose.yml-next`.
+
+A pull failure in step 1 aborts with the chain untouched. A start failure in step 5 is
+rolled back: the containers are stopped, `docker-compose.yml` goes back to
+`docker-compose.yml-next` and the backup goes back to `docker-compose.yml`, so the
+upgrade stays staged for the retry. The containers are left stopped unless
+`--restart-previous-on-failure` is set. It is off by default because on a real halt the
+previous binary must not run, it could end up following the wrong fork past the upgrade
+height.
+
+### Stale Signals
+
+Cosmos SDK never deletes `upgrade-info.json`. When an upgrade is applied by anything
+other than this program (by hand, by an older version of it), the file stays in the data
+folder, and the next staged `docker-compose.yml-next` upgrades on the spot.
+
+With `--rpc-url` set, every time `upgrade-info.json` is seen the node's latest height
+is read from `/status`. A node past the plan height already runs the upgraded binary, so
+the file is renamed to `upgrade-info.json-stale` and ignored. An unreachable node proves
+nothing (a halted chain usually has its RPC down), so the signal is then trusted.
+
+Without `--rpc-url`, check for a leftover `upgrade-info.json` before staging
+`docker-compose.yml-next`.
 
 ## File Structure
 
@@ -171,7 +199,8 @@ Your chain directory should look like this:
 ├── docker-compose.yml-backup  # Previous configuration (written during upgrade)
 └── data/
     ├── upgrade-info.json          # Appears during planned upgrades
-    └── upgrade-info.json-applied  # Last applied plan, kept for inspection
+    ├── upgrade-info.json-applied  # Last applied plan, kept for inspection
+    └── upgrade-info.json-stale    # Last stale signal cleared, kept for inspection
 ```
 
 ## Logging
@@ -206,7 +235,8 @@ when the tool runs inside a container.
 
 - Validates directories and required files on startup
 - Creates backups before making changes
-- Attempts to restore backups if upgrade fails
+- Pulls staged images before stopping anything
+- Restores the previous compose file if the new containers fail to start, optionally restarting the previous ones
 - Leaves `upgrade-info.json` in place on failure so the upgrade can be retried
 - Continues watching even after errors
 - Comprehensive error logging

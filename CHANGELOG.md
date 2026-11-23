@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
+### Added
+
+- Add `--rpc-url` to detect a stale `upgrade-info.json`. When the node reports a height past the plan height, the upgrade was already applied by other means, so the file is renamed to `upgrade-info.json-stale` instead of upgrading the moment the next `docker-compose.yml-next` is staged.
+- Pull the images of `docker-compose.yml-next` before stopping the chain, so a missing image aborts the upgrade with the chain still running. Disable with `--pre-pull=false`.
+
 ### Fixed
+
+- Roll back the compose files when the new containers fail to start, so the upgrade stays staged and is retried. Add `--restart-previous-on-failure` to also start the previous containers again, off by default since on a real halt the previous binary must not run. Previously the staged file was already consumed, so the chain stayed down, the retry could never run and the status misleadingly read `BLOCKED`.
 
 - Stop attaching the `*.dockerbuild` build records produced by `docker/build-push-action` to the GitHub release, only the binaries, `.deb` packages and `checksums.txt` are published now.
 

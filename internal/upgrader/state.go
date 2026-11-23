@@ -11,6 +11,7 @@ import (
 const (
 	UpgradeInfoFile     = "upgrade-info.json"
 	UpgradeInfoApplied  = "upgrade-info.json-applied"
+	UpgradeInfoStale    = "upgrade-info.json-stale"
 	DockerComposeFile   = "docker-compose.yml"
 	DockerComposeNext   = "docker-compose.yml-next"
 	DockerComposeBackup = "docker-compose.yml-backup"

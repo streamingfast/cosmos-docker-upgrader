@@ -29,6 +29,7 @@ func main() {
 	instantiateLoggers()
 
 	config := upgrader.Config{}
+	var rpcURL string
 
 	rootCmd := &cobra.Command{
 		Use:     "cosmos-docker-upgrader <ChainFolder> <DataFolder>",
@@ -53,6 +54,9 @@ A status line is logged at startup, on every state change and on a heartbeat
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config.ChainFolder = args[0]
 			config.DataFolder = args[1]
+			if rpcURL != "" {
+				config.HeightSource = upgrader.NewCometRPC(rpcURL)
+			}
 
 			return run(cmd.Context(), config)
 		},
@@ -62,6 +66,9 @@ A status line is logged at startup, on every state change and on a heartbeat
 	flags.DurationVar(&config.StatusInterval, "status-interval", time.Hour, "How often to log a status line, 0 disables the heartbeat")
 	flags.DurationVar(&config.PollInterval, "poll-interval", 30*time.Second, "How often to re-check both folders in case a filesystem event was missed, 0 disables polling")
 	flags.DurationVar(&config.RetryInterval, "retry-interval", 5*time.Minute, "How long to wait before retrying a failed upgrade, restaging docker-compose.yml-next retries immediately")
+	flags.StringVar(&rpcURL, "rpc-url", "", "CometBFT RPC of the node (e.g. http://localhost:26657), used to detect and clear an upgrade-info.json the node is already past, empty disables the check")
+	flags.BoolVar(&config.PrePull, "pre-pull", true, "Pull the images of docker-compose.yml-next before stopping the chain, so a missing image aborts the upgrade with the chain still running")
+	flags.BoolVar(&config.RestartPreviousOnFailure, "restart-previous-on-failure", false, "When the upgraded containers fail to start, start the previous ones again after rolling back the compose files. Only safe if the previous binary cannot run past the upgrade height")
 	flags.DurationVar(&config.DebounceDelay, "debounce-delay", 500*time.Millisecond, "How long to wait after a filesystem event before acting, to let the file be fully written")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -107,6 +114,9 @@ func run(ctx context.Context, config upgrader.Config) error {
 		zap.Duration("status_interval", config.StatusInterval),
 		zap.Duration("poll_interval", config.PollInterval),
 		zap.Duration("retry_interval", config.RetryInterval),
+		zap.Bool("stale_signal_check", config.HeightSource != nil),
+		zap.Bool("pre_pull", config.PrePull),
+		zap.Bool("restart_previous_on_failure", config.RestartPreviousOnFailure),
 	)
 
 	return upgrader.New(config, upgrader.ExecRunner{}).Run(ctx)

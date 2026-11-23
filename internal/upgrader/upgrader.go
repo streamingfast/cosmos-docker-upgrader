@@ -35,6 +35,21 @@ type Config struct {
 
 	// DebounceDelay coalesces bursts of fsnotify events into a single evaluation.
 	DebounceDelay time.Duration
+
+	// HeightSource, when set, is queried whenever upgrade-info.json is present. A
+	// node already past the plan height proves the signal is left over from an
+	// upgrade applied out of band, so it is cleared instead of firing the next
+	// staged compose file. Nil disables the check.
+	HeightSource HeightSource
+
+	// PrePull pulls the images of docker-compose.yml-next before stopping
+	// anything, so a missing image aborts the upgrade with the chain untouched.
+	PrePull bool
+
+	// RestartPreviousOnFailure starts the previous containers again after a
+	// failed start was rolled back. Off by default: on a real halt the previous
+	// binary must not run, it could be fed blocks past the upgrade height.
+	RestartPreviousOnFailure bool
 }
 
 // UpgradeResult records the outcome of the most recent upgrade attempt.
@@ -199,7 +214,8 @@ func (u *Upgrader) evaluate(ctx context.Context, trigger string, force bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	snapshot := takeSnapshot(u.config.ChainFolder, u.config.DataFolder)
+	snapshot := u.clearStaleSignal(ctx, takeSnapshot(u.config.ChainFolder, u.config.DataFolder))
+
 	if snapshot.PlanParseErr != nil {
 		zlog.Warn("could not parse "+UpgradeInfoFile+", treating it as present but unreadable",
 			zap.Error(snapshot.PlanParseErr),
@@ -223,6 +239,55 @@ func (u *Upgrader) evaluate(ctx context.Context, trigger string, force bool) {
 	if state == StateUpgradeReady {
 		u.runUpgrade(ctx, snapshot)
 	}
+}
+
+// clearStaleSignal renames upgrade-info.json out of the way when the node reports
+// a height past the plan, which means the upgrade was already applied by some
+// other means (by hand, by a previous upgrader). Left in place, such a signal
+// fires the next staged compose file the moment it appears. It returns the
+// snapshot to act on.
+//
+// An unreachable node proves nothing, a halted chain usually has its RPC down,
+// so the signal is then trusted as before. Once proven stale the file is moved
+// rather than ignored, so a later RPC outage cannot bring it back to life.
+func (u *Upgrader) clearStaleSignal(ctx context.Context, snapshot Snapshot) Snapshot {
+	if u.config.HeightSource == nil || snapshot.UpgradeInfo == nil || snapshot.Plan == nil {
+		return snapshot
+	}
+
+	height, err := u.config.HeightSource.LatestHeight(ctx)
+	if err != nil {
+		if tracer.Enabled() {
+			zlog.Debug("node height unavailable, trusting "+UpgradeInfoFile, zap.Error(err))
+		}
+		return snapshot
+	}
+
+	// A halted node has committed at most plan height - 1, the upgrade block is
+	// only ever committed by the upgraded binary.
+	if height <= snapshot.Plan.Height {
+		return snapshot
+	}
+
+	stalePath := filepath.Join(u.config.DataFolder, UpgradeInfoStale)
+	zlog.Warn("stale "+UpgradeInfoFile+" detected, node is already past the upgrade height, clearing it",
+		zap.String("upgrade_name", snapshot.Plan.Name),
+		zap.Int64("upgrade_height", snapshot.Plan.Height),
+		zap.Int64("node_height", height),
+		zap.Time("upgrade_info_modified", snapshot.UpgradeInfo.ModTime),
+		zap.String("from", snapshot.UpgradeInfo.Path),
+		zap.String("to", stalePath),
+	)
+
+	if err := os.Rename(snapshot.UpgradeInfo.Path, stalePath); err != nil {
+		// Still known stale, so it is ignored for this evaluation and the rename
+		// is retried on the next one.
+		zlog.Error("could not clear stale "+UpgradeInfoFile+", ignoring it, rename it by hand", zap.Error(err))
+		snapshot.UpgradeInfo, snapshot.Plan, snapshot.PlanParseErr = nil, nil, nil
+		return snapshot
+	}
+
+	return takeSnapshot(u.config.ChainFolder, u.config.DataFolder)
 }
 
 // deriveState layers retry bookkeeping on top of the disk-derived state so a
@@ -317,42 +382,54 @@ func (u *Upgrader) runUpgrade(ctx context.Context, snapshot Snapshot) {
 	u.logStatus("upgrade_finished", previous)
 }
 
-// performUpgrade runs the swap sequence. On failure after the backup was taken
-// it restores the backup so the node can be brought back up by hand.
+// performUpgrade runs the swap sequence. Any failure past the backup puts the
+// compose files back where they were, so the failed upgrade stays staged and
+// can be retried.
 func (u *Upgrader) performUpgrade(ctx context.Context, snapshot Snapshot) error {
 	chainFolder := u.config.ChainFolder
 	currentPath := filepath.Join(chainFolder, DockerComposeFile)
 	backupPath := filepath.Join(chainFolder, DockerComposeBackup)
 	nextPath := filepath.Join(chainFolder, DockerComposeNext)
 
-	zlog.Info("upgrade step 1/5: stopping containers", zap.String("command", "docker-compose down"))
-	if err := u.runner.Run(ctx, chainFolder, "docker-compose", "down"); err != nil {
-		return fmt.Errorf("step 1/5 stop containers: %w", err)
+	// Pulling first means a missing or mistyped image fails here, while the chain
+	// is still running, instead of after it was stopped.
+	if u.config.PrePull {
+		zlog.Info("upgrade step 1/6: pulling staged images", zap.String("command", "docker-compose -f "+DockerComposeNext+" pull"))
+		if err := u.runner.Run(ctx, chainFolder, "docker-compose", "-f", DockerComposeNext, "pull"); err != nil {
+			return fmt.Errorf("step 1/6 pull staged images: %w (nothing was stopped)", err)
+		}
+	} else {
+		zlog.Info("upgrade step 1/6: pulling staged images skipped, pre-pull disabled")
 	}
 
-	zlog.Info("upgrade step 2/5: backing up current compose file",
+	zlog.Info("upgrade step 2/6: stopping containers", zap.String("command", "docker-compose down"))
+	if err := u.runner.Run(ctx, chainFolder, "docker-compose", "down"); err != nil {
+		return fmt.Errorf("step 2/6 stop containers: %w", err)
+	}
+
+	zlog.Info("upgrade step 3/6: backing up current compose file",
 		zap.String("from", currentPath),
 		zap.String("to", backupPath),
 	)
 	if err := os.Rename(currentPath, backupPath); err != nil {
-		return fmt.Errorf("step 2/5 backup %s: %w", DockerComposeFile, err)
+		return fmt.Errorf("step 3/6 backup %s: %w", DockerComposeFile, err)
 	}
 
-	zlog.Info("upgrade step 3/5: promoting staged compose file",
+	zlog.Info("upgrade step 4/6: promoting staged compose file",
 		zap.String("from", nextPath),
 		zap.String("to", currentPath),
 	)
 	if err := os.Rename(nextPath, currentPath); err != nil {
 		zlog.Error("promotion failed, restoring backup", zap.Error(err))
 		if restoreErr := os.Rename(backupPath, currentPath); restoreErr != nil {
-			return fmt.Errorf("step 3/5 promote %s: %w (restoring backup also failed: %v)", DockerComposeNext, err, restoreErr)
+			return fmt.Errorf("step 4/6 promote %s: %w (restoring backup also failed: %v)", DockerComposeNext, err, restoreErr)
 		}
-		return fmt.Errorf("step 3/5 promote %s: %w (backup restored)", DockerComposeNext, err)
+		return fmt.Errorf("step 4/6 promote %s: %w (backup restored)", DockerComposeNext, err)
 	}
 
-	zlog.Info("upgrade step 4/5: starting containers", zap.String("command", "docker-compose up -d"))
+	zlog.Info("upgrade step 5/6: starting containers", zap.String("command", "docker-compose up -d"))
 	if err := u.runner.Run(ctx, chainFolder, "docker-compose", "up", "-d"); err != nil {
-		return fmt.Errorf("step 4/5 start containers: %w", err)
+		return fmt.Errorf("step 5/6 start containers: %w (%s)", err, u.rollback(ctx, currentPath, backupPath, nextPath))
 	}
 
 	// Clearing the signal is what prevents the now-stale upgrade-info.json from
@@ -360,16 +437,54 @@ func (u *Upgrader) performUpgrade(ctx context.Context, snapshot Snapshot) error 
 	// rather than deleted so the applied plan stays on disk for inspection.
 	if snapshot.UpgradeInfo != nil {
 		appliedPath := filepath.Join(u.config.DataFolder, UpgradeInfoApplied)
-		zlog.Info("upgrade step 5/5: clearing upgrade signal",
+		zlog.Info("upgrade step 6/6: clearing upgrade signal",
 			zap.String("from", snapshot.UpgradeInfo.Path),
 			zap.String("to", appliedPath),
 		)
 		if err := os.Rename(snapshot.UpgradeInfo.Path, appliedPath); err != nil {
-			return fmt.Errorf("step 5/5 clear %s: %w (containers are up, clear it manually or the next staged compose file will upgrade immediately)", UpgradeInfoFile, err)
+			return fmt.Errorf("step 6/6 clear %s: %w (containers are up, clear it manually or the next staged compose file will upgrade immediately)", UpgradeInfoFile, err)
 		}
 	}
 
 	return nil
+}
+
+// rollback undoes a promotion whose containers failed to start: the promoted
+// file goes back to docker-compose.yml-next and the backup back to
+// docker-compose.yml, so the upgrade stays staged and the retry can run. The
+// previous containers are only started again with RestartPreviousOnFailure. It
+// returns a summary of what was done for the upgrade error.
+func (u *Upgrader) rollback(ctx context.Context, currentPath, backupPath, nextPath string) string {
+	zlog.Warn("start failed, rolling back to the previous compose file")
+
+	// Whatever did start from the promoted file must go before it is swapped
+	// out, docker-compose can only stop what its current file describes.
+	if err := u.runner.Run(ctx, u.config.ChainFolder, "docker-compose", "down"); err != nil {
+		zlog.Error("could not stop partially started containers, continuing rollback", zap.Error(err))
+	}
+
+	if err := os.Rename(currentPath, nextPath); err != nil {
+		zlog.Error("rollback failed, could not move promoted compose file back", zap.Error(err))
+		return fmt.Sprintf("rollback failed: unstage %s: %v", DockerComposeFile, err)
+	}
+
+	if err := os.Rename(backupPath, currentPath); err != nil {
+		zlog.Error("rollback failed, could not restore backup", zap.Error(err))
+		return fmt.Sprintf("rollback failed: restore %s: %v", DockerComposeBackup, err)
+	}
+
+	if !u.config.RestartPreviousOnFailure {
+		zlog.Info("rolled back compose files, containers left stopped, upgrade stays staged for retry")
+		return "compose files rolled back, containers left stopped"
+	}
+
+	if err := u.runner.Run(ctx, u.config.ChainFolder, "docker-compose", "up", "-d"); err != nil {
+		zlog.Error("compose files rolled back but previous containers failed to start", zap.Error(err))
+		return fmt.Sprintf("compose files rolled back, restarting previous containers failed: %v", err)
+	}
+
+	zlog.Info("rolled back, previous containers started again, upgrade stays staged for retry")
+	return "rolled back, previous containers started"
 }
 
 // logStatus emits the single status line for this occasion. Every status log
