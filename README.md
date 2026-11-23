@@ -69,14 +69,13 @@ Install `apache2-utils` if it is not already present, it provides `rotatelogs`.
 
 Download the latest release from the [releases page](https://github.com/streamingfast/cosmos-docker-upgrader/releases):
 
-- **Linux AMD64**: `cosmos-docker-upgrader-linux-amd64`
-- **Linux ARM64**: `cosmos-docker-upgrader-linux-arm64`
-- **macOS ARM64**: `cosmos-docker-upgrader-darwin-arm64`
+- **Linux AMD64**: `cosmos-docker-upgrader_linux_x86_64.tar.gz`
+- **Linux ARM64**: `cosmos-docker-upgrader_linux_arm64.tar.gz`
+- **macOS ARM64**: `cosmos-docker-upgrader_darwin_arm64.tar.gz`
 
 ```bash
 # Example for Linux AMD64
-curl -L -o cosmos-docker-upgrader https://github.com/streamingfast/cosmos-docker-upgrader/releases/latest/download/cosmos-docker-upgrader-linux-amd64
-chmod +x cosmos-docker-upgrader
+curl -L https://github.com/streamingfast/cosmos-docker-upgrader/releases/latest/download/cosmos-docker-upgrader_linux_x86_64.tar.gz | tar -xz cosmos-docker-upgrader
 ```
 
 ### Option 3: Build from Source
@@ -85,8 +84,7 @@ chmod +x cosmos-docker-upgrader
 go install github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader@latest
 ```
 
-Or reproduce a release binary exactly, which builds it in a container and writes it
-to `dist/`:
+Or build a binary in a container from `Dockerfile`, which writes it to `dist/`:
 
 ```bash
 docker buildx build --target binary --output type=local,dest=dist \
@@ -226,34 +224,31 @@ when the tool runs inside a container.
 
 ## Releases
 
-Releases are built by GitHub Actions when a `v*` tag is pushed. Every binary is
-built inside a container from `Dockerfile`, so a release artifact can be reproduced
-locally with the same command the workflow runs.
-
-Three build jobs run in parallel, each on a native runner:
-
-| Job | Runner | Produces |
-| --- | --- | --- |
-| `linux/amd64` | `ubuntu-24.04` | binary + `.deb` |
-| `linux/arm64` | `ubuntu-24.04-arm` | binary + `.deb` |
-| `darwin/arm64` | `ubuntu-24.04` | binary |
-
-The builder stage always runs on the native platform and cross compiles, so no
-emulation is involved. Each Linux job installs the `.deb` it just built as a smoke
-test. A final job collects every artifact, writes `checksums.txt` and creates the
-GitHub release.
-
-The workflow also runs on pull requests, without publishing, so packaging breakage
-is caught before tagging.
+Releases go through [sfreleaser](https://github.com/streamingfast/sfreleaser) and two
+GitHub Actions workflows, `draft-release.yml` and `publish-release.yml`.
 
 ### Creating a Release
 
-1. Update `CHANGELOG.md`, moving the `Unreleased` section under the new version.
-2. Tag and push:
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
+1. Open a pull request against `main` that moves the `Unreleased` section of
+   `CHANGELOG.md` under the new version header, e.g. `## v1.1.0`.
+2. `draft-release.yml` runs on that pull request and prepares the release.
+3. Merge the pull request. `publish-release.yml` tags the release, publishes it on
+   GitHub and starts `deb.yml` on the new tag.
+
+`publish-release.yml` can be re-run from the Actions tab with the `tag` input, e.g.
+`v1.1.0`, to redo the publish steps.
+
+### Debian Packages
+
+sfreleaser cannot build `.deb` packages yet, so `deb.yml` does it. It is started
+automatically by `publish-release.yml`, and can be run by hand with the release `tag`
+as input (`gh workflow run deb.yml -f tag=v1.1.0`). On the existing release, for
+`amd64` and `arm64` it:
+
+- downloads the Linux binary sfreleaser attached to the release, on a native runner;
+- builds the package with `nfpm.yaml`;
+- installs the package as a smoke test;
+- attaches the `.deb` to the release.
 
 ## License
 

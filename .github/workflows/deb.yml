@@ -1,0 +1,85 @@
+name: Build deb packages
+
+# Started by publish-release.yml on the release tag, or manually with the tag of
+# an existing release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the .deb packages to, e.g. v1.2.3 (defaults to the ref the workflow runs on)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  NFPM_VERSION: v2.47.0
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  deb:
+    name: Build deb ${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: ubuntu-24.04
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Extract version
+        id: version
+        run: |
+          # Debian versions must not carry the leading v
+          echo "PKG_VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # The binary was built and attached by sfreleaser when it published the release.
+      - name: Download binary from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_ARCH: ${{ matrix.goarch == 'amd64' && 'x86_64' || matrix.goarch }}
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" --pattern "cosmos-docker-upgrader_linux_${ARCHIVE_ARCH}.tar.gz" --output - \
+            | tar -xz -C dist cosmos-docker-upgrader
+
+      # The runner has the architecture of the binary, so it can run here.
+      - name: Smoke test binary
+        run: dist/cosmos-docker-upgrader --version
+
+      - name: Build deb package
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e PKG_VERSION="${{ steps.version.outputs.PKG_VERSION }}" \
+            -e PKG_ARCH="${{ matrix.goarch }}" \
+            goreleaser/nfpm:${{ env.NFPM_VERSION }} \
+            package --config nfpm.yaml --packager deb --target dist
+
+      # Installing it is the only way to know the package is actually sane
+      - name: Smoke test installation
+        run: |
+          sudo dpkg --install dist/*.deb
+          dpkg --listfiles cosmos-docker-upgrader
+
+          # dpkg reports excluded paths as installed, so assert they really landed
+          test -x /usr/bin/cosmos-docker-upgrader
+          test -f /lib/systemd/system/cosmos-docker-upgrader@.service
+          test -f /usr/share/cosmos-docker-upgrader/example.env
+          test -d /etc/cosmos-docker-upgrader
+
+          systemd-analyze verify /lib/systemd/system/cosmos-docker-upgrader@.service || true
+
+      - name: Attach deb to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.deb --clobber

@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## Unreleased
 
-### Fixed
+### Changed
 
-- Stop attaching the `*.dockerbuild` build records produced by `docker/build-push-action` to the GitHub release, only the binaries, `.deb` packages and `checksums.txt` are published now.
+- Release through `sfreleaser` and the `draft-release.yml` / `publish-release.yml` workflows instead of pushing a `v*` tag by hand. See the README for the new flow.
+- Build and attach the `.deb` packages from a separate `deb.yml` workflow, started on the release tag by the publish workflow or manually with a `tag` input. It packages the binary `sfreleaser` attached to the release.
+
+### Removed
+
+- Remove the legacy `release.yml` workflow, `sfreleaser` now builds and attaches the release binaries and `checksums.txt`.
 
 ## v1.0.0
 
