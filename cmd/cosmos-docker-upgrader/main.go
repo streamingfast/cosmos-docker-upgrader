@@ -12,16 +12,15 @@ import (
 	"github.com/streamingfast/cosmos-docker-upgrader/internal/upgrader"
 
 	"github.com/spf13/cobra"
+	"github.com/streamingfast/cli"
 	"github.com/streamingfast/logging"
 	"go.uber.org/zap"
 )
 
-var (
-	// Version information (set during build)
-	Version   = "dev"
-	BuildTime = "unknown"
-	GitCommit = "unknown"
-)
+// version is injected by sfreleaser via `-X main.version=...`. Commit and date
+// are not injected, cli.GetDisplayVersion reads them from the VCS info Go stamps
+// in the binary.
+var version = "dev"
 
 var zlog, _ = logging.PackageLogger("upgrader", "github.com/streamingfast/cosmos-docker-upgrader/cmd/cosmos-docker-upgrader")
 
@@ -34,7 +33,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:     "cosmos-docker-upgrader <ChainFolder> <DataFolder>",
 		Short:   "Cosmos Docker Upgrader - Watches for upgrade-info.json and manages Docker Compose upgrades",
-		Version: fmt.Sprintf("%s (built: %s, commit: %s)", Version, BuildTime, GitCommit),
+		Version: cli.GetDisplayVersion(version),
 		Long: `Cosmos Docker Upgrader watches for upgrade-info.json files in a data directory
 and automatically manages Docker Compose upgrades for Cosmos chains.
 
@@ -106,9 +105,7 @@ func instantiateLoggers() {
 
 func run(ctx context.Context, config upgrader.Config, rpcURL string) error {
 	zlog.Info("starting cosmos-docker-upgrader",
-		zap.String("version", Version),
-		zap.String("build_time", BuildTime),
-		zap.String("git_commit", GitCommit),
+		zap.String("version", cli.GetDisplayVersion(version)),
 		zap.String("chain_folder", config.ChainFolder),
 		zap.String("data_folder", config.DataFolder),
 		zap.Duration("status_interval", config.StatusInterval),
