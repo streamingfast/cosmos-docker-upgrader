@@ -31,6 +31,12 @@ jobs:
         id: detect
         uses: streamingfast/actions/sfreleaser/detect@v1
 
+      - name: Set up Go
+        if: steps.detect.outputs.is_release_pr
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
       - name: Prepare release
         if: steps.detect.outputs.is_release_pr
         uses: streamingfast/actions/sfreleaser/prepare@v1
