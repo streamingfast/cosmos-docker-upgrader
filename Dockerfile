@@ -21,8 +21,6 @@ ARG GOOS=
 ARG GOARCH=
 
 ARG VERSION=dev
-ARG BUILD_TIME=unknown
-ARG GIT_COMMIT=unknown
 
 WORKDIR /src
 
@@ -38,7 +36,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOARCH="${GOARCH:-$TARGETARCH}" \
     go build \
       -trimpath \
-      -ldflags "-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT}" \
+      -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/cosmos-docker-upgrader \
       ./cmd/cosmos-docker-upgrader
 

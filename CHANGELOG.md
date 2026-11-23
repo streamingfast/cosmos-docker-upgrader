@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## v1.1.2
+
+### Fixed
+
+- Fix `--version` and the startup log line reporting `dev` / `unknown` on released binaries. The version is now injected as `main.version` as sfreleaser does, and the commit and commit date are read from the VCS info stamped in the binary.
+
 ## v1.1.1
 
 ### Added
