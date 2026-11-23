@@ -127,6 +127,7 @@ func (u *Upgrader) Run(ctx context.Context) error {
 		defer u.statusTimer.Stop()
 	}
 
+	u.logChainHead(ctx)
 	u.evaluate(ctx, "startup", true)
 
 	for {
@@ -239,6 +240,23 @@ func (u *Upgrader) evaluate(ctx context.Context, trigger string, force bool) {
 	if state == StateUpgradeReady {
 		u.runUpgrade(ctx, snapshot)
 	}
+}
+
+// logChainHead queries the node once at startup so a misconfigured --rpc-url
+// shows up right away instead of only when upgrade-info.json first appears.
+// Failure is only a warning, the node may simply not be up yet.
+func (u *Upgrader) logChainHead(ctx context.Context) {
+	if u.config.HeightSource == nil {
+		return
+	}
+
+	height, err := u.config.HeightSource.LatestHeight(ctx)
+	if err != nil {
+		zlog.Warn("node RPC unreachable at startup, stale signal detection is unavailable until it answers", zap.Error(err))
+		return
+	}
+
+	zlog.Info("node RPC reachable", zap.Int64("chain_head", height))
 }
 
 // clearStaleSignal renames upgrade-info.json out of the way when the node reports

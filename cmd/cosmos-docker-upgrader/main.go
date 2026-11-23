@@ -58,7 +58,7 @@ A status line is logged at startup, on every state change and on a heartbeat
 				config.HeightSource = upgrader.NewCometRPC(rpcURL)
 			}
 
-			return run(cmd.Context(), config)
+			return run(cmd.Context(), config, rpcURL)
 		},
 	}
 
@@ -104,7 +104,7 @@ func instantiateLoggers() {
 	logging.InstantiateLoggers(options...)
 }
 
-func run(ctx context.Context, config upgrader.Config) error {
+func run(ctx context.Context, config upgrader.Config, rpcURL string) error {
 	zlog.Info("starting cosmos-docker-upgrader",
 		zap.String("version", Version),
 		zap.String("build_time", BuildTime),
@@ -115,6 +115,7 @@ func run(ctx context.Context, config upgrader.Config) error {
 		zap.Duration("poll_interval", config.PollInterval),
 		zap.Duration("retry_interval", config.RetryInterval),
 		zap.Bool("stale_signal_check", config.HeightSource != nil),
+		zap.String("rpc_url", rpcURL),
 		zap.Bool("pre_pull", config.PrePull),
 		zap.Bool("restart_previous_on_failure", config.RestartPreviousOnFailure),
 	)

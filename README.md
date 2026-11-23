@@ -27,7 +27,7 @@ Each release publishes a `.deb` for `amd64` and `arm64`. It installs the binary 
 one instance per chain.
 
 ```bash
-version=1.1.0
+version=1.1.1
 curl -L -O https://github.com/streamingfast/cosmos-docker-upgrader/releases/download/v${version}/cosmos-docker-upgrader_${version}_amd64.deb
 sudo apt install ./cosmos-docker-upgrader_${version}_amd64.deb
 ```
