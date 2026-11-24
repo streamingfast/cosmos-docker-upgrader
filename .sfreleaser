@@ -7,4 +7,4 @@ release:
   deb: true
   deb-recommends: [apache2-utils] # rotatelogs, used by the shipped systemd unit
   deb-maintainer: StreamingFast <contact@streamingfast.io>
-  deb-smoke-test: true
+  deb-smoke-test: false # re-enable once the arm64 smoke test works on amd64 runners
