@@ -173,6 +173,10 @@ Instead, the applied plan is remembered by name and height, in memory and in
 holds that plan it is not a signal: nothing fires, even if `docker-compose.yml-next` is
 staged again. The next halt writes a different plan, which fires normally.
 
+To run the same plan again (the swap went through but the new containers are broken and
+you restaged a fixed `docker-compose.yml-next`), delete `upgrade-info.json-applied`. It is
+read from disk on every evaluation, no restart needed.
+
 A pull failure in step 1 aborts with the chain untouched. A start failure in step 5 is
 rolled back: the containers are stopped, `docker-compose.yml` goes back to
 `docker-compose.yml-next` and the backup goes back to `docker-compose.yml`, so the

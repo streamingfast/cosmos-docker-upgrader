@@ -80,9 +80,10 @@ type Upgrader struct {
 	retryAfter      time.Time
 	failedNextMod   time.Time
 
-	// applied is the last plan swapped to, mirrored on disk in
-	// upgrade-info.json-applied so it survives an upgrader restart.
-	applied *UpgradePlan
+	// unpersistedApplied is the last plan swapped to when recording it in
+	// upgrade-info.json-applied failed. The disk is the source of truth otherwise,
+	// so deleting that file by hand re-arms the plan without a restart.
+	unpersistedApplied *UpgradePlan
 
 	// statusTimer is nil when the heartbeat is disabled.
 	statusTimer *time.Timer
@@ -338,32 +339,31 @@ func (u *Upgrader) takeSnapshot() Snapshot {
 	return snapshot
 }
 
-// isApplied reports whether the plan is the one this upgrader last swapped to.
-// The marker on disk is loaded lazily so the answer survives a restart.
+// isApplied reports whether the plan is the one this upgrader last swapped to. It
+// reads the marker from disk every time: that is what survives a restart, and
+// what lets an operator re-arm a plan by deleting upgrade-info.json-applied.
 func (u *Upgrader) isApplied(plan UpgradePlan) bool {
-	if u.applied == nil {
-		marker, err := readUpgradePlan(filepath.Join(u.config.DataFolder, UpgradeInfoApplied))
-		if err != nil {
-			return false
-		}
-		u.applied = marker
+	if marker, err := readUpgradePlan(filepath.Join(u.config.DataFolder, UpgradeInfoApplied)); err == nil && marker.sameUpgrade(plan) {
+		return true
 	}
 
-	return u.applied.sameUpgrade(plan)
+	return u.unpersistedApplied != nil && u.unpersistedApplied.sameUpgrade(plan)
 }
 
-// markApplied records the plan as applied, in memory first so a failing disk
-// write cannot cause the swap to run twice.
+// markApplied records the plan as applied on disk. If that fails it is kept in
+// memory so a failing disk write cannot cause the swap to run twice.
 func (u *Upgrader) markApplied(plan UpgradePlan) {
-	u.applied = &plan
-
 	content, err := json.Marshal(plan)
 	if err == nil {
 		err = os.WriteFile(filepath.Join(u.config.DataFolder, UpgradeInfoApplied), content, 0644)
 	}
 	if err != nil {
+		u.unpersistedApplied = &plan
 		zlog.Error("could not record the applied plan on disk, it is only remembered until this process exits", zap.Error(err))
+		return
 	}
+
+	u.unpersistedApplied = nil
 }
 
 // deriveState layers retry bookkeeping on top of the disk-derived state so a

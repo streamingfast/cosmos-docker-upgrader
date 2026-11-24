@@ -308,6 +308,23 @@ func TestEvaluate_AppliedPlanSurvivesUpgraderRestart(t *testing.T) {
 	assert.Empty(t, fixture.runner.commands, "the applied plan must be remembered across restarts")
 }
 
+// Escape hatch: the swap succeeded but the new binary is broken, the operator
+// fixes the compose file and wants the same plan to run again.
+func TestEvaluate_DeletingAppliedMarkerRearmsPlan(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.swap()
+
+	fixture.stageComposeNext("image: chain:v2-fixed")
+	fixture.evaluate()
+	require.Empty(t, fixture.runner.commands)
+
+	require.NoError(t, os.Remove(filepath.Join(fixture.dataFolder, UpgradeInfoApplied)))
+	fixture.evaluate()
+
+	assert.Equal(t, upgradeCommands, fixture.runner.commands, "no restart of the upgrader needed")
+	assert.Equal(t, "image: chain:v2-fixed", fixture.readCompose())
+}
+
 func TestEvaluate_SignalWrittenForDifferentPlanStillFires(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.swap()
