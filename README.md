@@ -277,7 +277,9 @@ when the tool runs inside a container.
 ## Releases
 
 Releases go through [sfreleaser](https://github.com/streamingfast/sfreleaser) and two
-GitHub Actions workflows, `draft-release.yml` and `publish-release.yml`.
+GitHub Actions workflows, `draft-release.yml` and `publish-release.yml`. The Linux and
+macOS archives, the `.deb` packages (`amd64` and `arm64`) and the Homebrew formula are all
+built by sfreleaser.
 
 ### Creating a Release
 
@@ -285,23 +287,26 @@ GitHub Actions workflows, `draft-release.yml` and `publish-release.yml`.
    `CHANGELOG.md` under the new version header, e.g. `## v1.1.0`.
 2. `draft-release.yml` runs on that pull request and prepares the release.
 3. Merge the pull request. `publish-release.yml` tags the release, publishes it on
-   GitHub and starts `deb.yml` on the new tag.
+   GitHub with its archives and `.deb` packages.
 
 `publish-release.yml` can be re-run from the Actions tab with the `tag` input, e.g.
 `v1.1.0`, to redo the publish steps.
 
 ### Debian Packages
 
-sfreleaser cannot build `.deb` packages yet, so `deb.yml` does it. It is started
-automatically by `publish-release.yml`, and can be run by hand with the release `tag`
-as input (`gh workflow run deb.yml -f tag=v1.1.0`). On the existing release, for
-`amd64` and `arm64` it:
+`.sfreleaser` enables `release.deb`, so sfreleaser builds one `.deb` per Linux binary with
+[nfpm](https://nfpm.goreleaser.com), generating the nfpm configuration by convention, and
+attaches them to the release. The binary goes to `/usr/bin`, every file under
+`packaging/deb/rootfs/` is installed at the same path in the package, and
+`packaging/deb/postinstall.sh` is the maintainer script (it creates
+`/etc/cosmos-docker-upgrader`, where the per-chain env files live). The example env file is
+deliberately not under `/usr/share/doc`: minimal images, including the official Ubuntu ones,
+configure dpkg with `path-exclude=/usr/share/doc/*` and would strip it on install.
 
-- downloads the Linux binary sfreleaser attached to the release, on a native runner;
-- builds the package with `nfpm.yaml`;
-- installs the package as a smoke test;
-- attaches the `.deb` to the release.
+With `deb-smoke-test`, each package is installed in a clean Debian container before the
+release is published, a package that does not install fails the release.
+`publish-release.yml` can be re-run with the release `tag` to redo the publish.
 
 ## License
 
-[Add your license here]
+Apache-2.0, see [LICENSE](LICENSE).

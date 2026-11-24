@@ -2,3 +2,9 @@ global:
   binary: cosmos-docker-upgrader
   language: golang
   variant: application
+release:
+  builder: native
+  deb: true
+  deb-recommends: [apache2-utils] # rotatelogs, used by the shipped systemd unit
+  deb-maintainer: StreamingFast <contact@streamingfast.io>
+  deb-smoke-test: true
