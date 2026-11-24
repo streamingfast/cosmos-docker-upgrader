@@ -43,8 +43,9 @@ Parameters:
 
 Both folders are watched. The upgrade runs when docker-compose.yml-next and
 upgrade-info.json are both present, in whichever order they appear. After a
-successful upgrade, upgrade-info.json is renamed to upgrade-info.json-applied so
-a later staged compose file does not trigger on a stale signal.
+successful upgrade, upgrade-info.json is kept (the new binary reads it at boot) and
+the applied plan is recorded in upgrade-info.json-applied so it never fires again.
+With --rpc-url, the file is renamed once the node is past the plan height.
 
 A status line is logged at startup, on every state change and on a heartbeat
 (see --status-interval). Set DLOG=upgrader=debug for verbose file event logging.`,
@@ -65,7 +66,7 @@ A status line is logged at startup, on every state change and on a heartbeat
 	flags.DurationVar(&config.StatusInterval, "status-interval", time.Hour, "How often to log a status line, 0 disables the heartbeat")
 	flags.DurationVar(&config.PollInterval, "poll-interval", 30*time.Second, "How often to re-check both folders in case a filesystem event was missed, 0 disables polling")
 	flags.DurationVar(&config.RetryInterval, "retry-interval", 5*time.Minute, "How long to wait before retrying a failed upgrade, restaging docker-compose.yml-next retries immediately")
-	flags.StringVar(&rpcURL, "rpc-url", "", "CometBFT RPC of the node (e.g. http://localhost:26657), used to detect and clear an upgrade-info.json the node is already past, empty disables the check")
+	flags.StringVar(&rpcURL, "rpc-url", "", "CometBFT RPC of the node (e.g. http://localhost:26657), used to clear upgrade-info.json once the node committed past the plan height, empty disables the check")
 	flags.BoolVar(&config.PrePull, "pre-pull", true, "Pull the images of docker-compose.yml-next before stopping the chain, so a missing image aborts the upgrade with the chain still running")
 	flags.BoolVar(&config.RestartPreviousOnFailure, "restart-previous-on-failure", false, "When the upgraded containers fail to start, start the previous ones again after rolling back the compose files. Only safe if the previous binary cannot run past the upgrade height")
 	flags.DurationVar(&config.DebounceDelay, "debounce-delay", 500*time.Millisecond, "How long to wait after a filesystem event before acting, to let the file be fully written")

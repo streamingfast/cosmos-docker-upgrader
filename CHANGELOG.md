@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## v1.1.3
+
+### Fixed
+
+- Stop renaming `upgrade-info.json` right after `docker-compose up -d`. Cosmos SDK apps read it at every boot to install the store upgrade loader, so removing it made upgrades adding a module store crash-loop (`version of store ... mismatch root store's version`). The file is now kept, and the applied plan (name and height) is remembered in memory and in `upgrade-info.json-applied`, so it survives an upgrader restart and is never re-applied nor fired by a newly staged `docker-compose.yml-next`.
+
+### Changed
+
+- With `--rpc-url`, `upgrade-info.json` is now renamed once the node height is strictly greater than the plan height, to `upgrade-info.json-applied` for an upgrade done by this program (still `upgrade-info.json-stale` for one applied out of band). Without `--rpc-url`, the file stays in place and the applied plan is ignored by name and height.
+
 ## v1.1.2
 
 ### Fixed
