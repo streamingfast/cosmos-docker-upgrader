@@ -64,19 +64,19 @@ func TestEvaluate_StaleUpgradeSignalDoesNotRetrigger(t *testing.T) {
 	fixture.evaluate()
 
 	assert.Equal(t, StateArmed, fixture.upgrader.state)
-	assert.Empty(t, fixture.runner.commands, "stale upgrade-info.json-applied must not trigger an upgrade")
+	assert.Empty(t, fixture.runner.commands, "an applied upgrade-info.json must not trigger an upgrade")
 	assert.Equal(t, 1, fixture.upgrader.upgradesApplied)
 }
 
-func TestEvaluate_ClearsUpgradeSignalOnSuccessOnly(t *testing.T) {
-	t.Run("success renames the signal", func(t *testing.T) {
+func TestEvaluate_KeepsUpgradeSignalOnSuccessOnly(t *testing.T) {
+	t.Run("success keeps the signal for the new binary", func(t *testing.T) {
 		fixture := newFixture(t)
 
 		fixture.stageComposeNext("image: chain:v2")
 		fixture.writeUpgradeInfo("v2.0.0", 100)
 		fixture.evaluate()
 
-		assert.NoFileExists(t, filepath.Join(fixture.dataFolder, UpgradeInfoFile))
+		assert.FileExists(t, filepath.Join(fixture.dataFolder, UpgradeInfoFile), "the new binary reads it at every boot")
 		assert.FileExists(t, filepath.Join(fixture.dataFolder, UpgradeInfoApplied))
 		assert.Equal(t, StateIdle, fixture.upgrader.state)
 	})
@@ -211,6 +211,129 @@ func TestEvaluate_StaleSignalFromOutOfBandUpgrade(t *testing.T) {
 		assert.Equal(t, upgradeCommands, fixture.runner.commands)
 		fixture.assertUpgradeApplied("image: chain:v2")
 	})
+}
+
+func (f *fixture) signalExists() bool {
+	_, err := os.Stat(filepath.Join(f.dataFolder, UpgradeInfoFile))
+	return err == nil
+}
+
+// swap stages v2 for plan (v2.0.0, 100) and runs the upgrade.
+func (f *fixture) swap() {
+	f.t.Helper()
+
+	f.stageComposeNext("image: chain:v2")
+	f.writeUpgradeInfo("v2.0.0", 100)
+	f.evaluate()
+	require.Equal(f.t, upgradeCommands, f.runner.commands)
+	f.runner.commands = nil
+}
+
+func TestEvaluate_SignalClearedOnceNodeCommittedPlanHeight(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.upgrader.config.HeightSource = fakeHeight{height: 99}
+	fixture.swap()
+	require.True(t, fixture.signalExists())
+
+	// The upgrade block can be in the block store (height == plan height) without
+	// the app having committed it, the file must stay.
+	for _, height := range []int64{99, 100} {
+		fixture.upgrader.config.HeightSource = fakeHeight{height: height}
+		fixture.evaluate()
+		assert.True(t, fixture.signalExists(), "node height %d has not committed the upgrade", height)
+	}
+
+	fixture.upgrader.config.HeightSource = fakeHeight{err: fmt.Errorf("connection refused")}
+	fixture.evaluate()
+	assert.True(t, fixture.signalExists(), "unreachable node proves nothing")
+
+	fixture.upgrader.config.HeightSource = fakeHeight{height: 101}
+	fixture.evaluate()
+	assert.False(t, fixture.signalExists())
+	assert.FileExists(t, filepath.Join(fixture.dataFolder, UpgradeInfoApplied))
+	assert.NoFileExists(t, filepath.Join(fixture.dataFolder, UpgradeInfoStale))
+
+	fixture.stageComposeNext("image: chain:v3")
+	fixture.evaluate()
+	assert.Equal(t, StateArmed, fixture.upgrader.state)
+	assert.Empty(t, fixture.runner.commands)
+}
+
+func TestEvaluate_RestagedNextDoesNotRetriggerAppliedPlan(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.upgrader.config.HeightSource = fakeHeight{height: 100}
+	fixture.swap()
+
+	fixture.stageComposeNext("image: chain:v3")
+	fixture.evaluate()
+
+	assert.Equal(t, StateArmed, fixture.upgrader.state)
+	assert.Empty(t, fixture.runner.commands, "node is not past the plan height yet, the applied plan must not re-run")
+	assert.True(t, fixture.signalExists())
+	assert.Equal(t, "image: chain:v2", fixture.readCompose())
+
+	// The next halt overwrites the file with a new plan, that one fires.
+	fixture.writeUpgradeInfo("v3.0.0", 200)
+	fixture.evaluate()
+	assert.Equal(t, upgradeCommands, fixture.runner.commands)
+	assert.Equal(t, "image: chain:v3", fixture.readCompose())
+}
+
+func TestEvaluate_NoHeightSourceIgnoresAppliedPlanForever(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.swap()
+
+	for range 3 {
+		fixture.stageComposeNext("image: chain:v3")
+		fixture.evaluate()
+	}
+
+	assert.Equal(t, StateArmed, fixture.upgrader.state)
+	assert.Empty(t, fixture.runner.commands)
+	assert.True(t, fixture.signalExists(), "without a height source the file is left in place")
+}
+
+func TestEvaluate_AppliedPlanSurvivesUpgraderRestart(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.swap()
+
+	// A new process only has the disk to go on.
+	restarted := New(fixture.upgrader.config, fixture.runner)
+	fixture.upgrader = restarted
+
+	fixture.stageComposeNext("image: chain:v3")
+	fixture.evaluate()
+
+	assert.Equal(t, StateArmed, restarted.state)
+	assert.Empty(t, fixture.runner.commands, "the applied plan must be remembered across restarts")
+}
+
+// Escape hatch: the swap succeeded but the new binary is broken, the operator
+// fixes the compose file and wants the same plan to run again.
+func TestEvaluate_DeletingAppliedMarkerRearmsPlan(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.swap()
+
+	fixture.stageComposeNext("image: chain:v2-fixed")
+	fixture.evaluate()
+	require.Empty(t, fixture.runner.commands)
+
+	require.NoError(t, os.Remove(filepath.Join(fixture.dataFolder, UpgradeInfoApplied)))
+	fixture.evaluate()
+
+	assert.Equal(t, upgradeCommands, fixture.runner.commands, "no restart of the upgrader needed")
+	assert.Equal(t, "image: chain:v2-fixed", fixture.readCompose())
+}
+
+func TestEvaluate_SignalWrittenForDifferentPlanStillFires(t *testing.T) {
+	fixture := newFixture(t)
+	fixture.swap()
+
+	fixture.writeUpgradeInfo("v2.0.0", 300)
+	fixture.stageComposeNext("image: chain:v3")
+	fixture.evaluate()
+
+	assert.Equal(t, upgradeCommands, fixture.runner.commands)
 }
 
 func TestPerformUpgrade_PullFailureLeavesChainRunning(t *testing.T) {
@@ -391,7 +514,7 @@ func (f *fixture) assertUpgradeApplied(expectedCompose string) {
 	assert.Equal(f.t, expectedCompose, f.readCompose(), "the staged compose file must be promoted")
 	assert.FileExists(f.t, filepath.Join(f.chainFolder, DockerComposeBackup))
 	assert.NoFileExists(f.t, filepath.Join(f.chainFolder, DockerComposeNext))
-	assert.NoFileExists(f.t, filepath.Join(f.dataFolder, UpgradeInfoFile))
+	assert.FileExists(f.t, filepath.Join(f.dataFolder, UpgradeInfoApplied), "the applied plan must be recorded")
 	assert.Equal(f.t, StateIdle, f.upgrader.state)
 }
 

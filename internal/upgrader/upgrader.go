@@ -2,6 +2,7 @@ package upgrader
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,9 +38,13 @@ type Config struct {
 	DebounceDelay time.Duration
 
 	// HeightSource, when set, is queried whenever upgrade-info.json is present. A
-	// node already past the plan height proves the signal is left over from an
-	// upgrade applied out of band, so it is cleared instead of firing the next
-	// staged compose file. Nil disables the check.
+	// node strictly past the plan height has committed the upgrade, so the signal
+	// is cleared (renamed to upgrade-info.json-applied when this upgrader did the
+	// swap, upgrade-info.json-stale when it was applied out of band) instead of
+	// firing the next staged compose file. Until then the file stays, the upgraded
+	// binary reads it at every boot. Nil disables the check: an upgrade this
+	// upgrader applied is then ignored forever by name and height, and the file is
+	// left for the next halt to overwrite.
 	HeightSource HeightSource
 
 	// PrePull pulls the images of docker-compose.yml-next before stopping
@@ -74,6 +79,11 @@ type Upgrader struct {
 	lastUpgrade     *UpgradeResult
 	retryAfter      time.Time
 	failedNextMod   time.Time
+
+	// unpersistedApplied is the last plan swapped to when recording it in
+	// upgrade-info.json-applied failed. The disk is the source of truth otherwise,
+	// so deleting that file by hand re-arms the plan without a restart.
+	unpersistedApplied *UpgradePlan
 
 	// statusTimer is nil when the heartbeat is disabled.
 	statusTimer *time.Timer
@@ -215,7 +225,7 @@ func (u *Upgrader) evaluate(ctx context.Context, trigger string, force bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	snapshot := u.clearStaleSignal(ctx, takeSnapshot(u.config.ChainFolder, u.config.DataFolder))
+	snapshot := u.clearStaleSignal(ctx, u.takeSnapshot())
 
 	if snapshot.PlanParseErr != nil {
 		zlog.Warn("could not parse "+UpgradeInfoFile+", treating it as present but unreadable",
@@ -259,14 +269,22 @@ func (u *Upgrader) logChainHead(ctx context.Context) {
 	zlog.Info("node RPC reachable", zap.Int64("chain_head", height))
 }
 
-// clearStaleSignal renames upgrade-info.json out of the way when the node reports
-// a height past the plan, which means the upgrade was already applied by some
-// other means (by hand, by a previous upgrader). Left in place, such a signal
-// fires the next staged compose file the moment it appears. It returns the
-// snapshot to act on.
+// clearStaleSignal renames upgrade-info.json out of the way once the node has
+// committed the upgrade, so the leftover file cannot fire the next staged compose
+// file the moment it appears. It returns the snapshot to act on.
 //
-// An unreachable node proves nothing, a halted chain usually has its RPC down,
-// so the signal is then trusted as before. Once proven stale the file is moved
+// Until then the file must stay: the upgraded binary reads it at every boot to
+// install its store upgrade loader, and any restart before the upgrade block is
+// committed needs it again. A plan this upgrader already swapped to is flagged
+// applied and ignored meanwhile, so it never re-fires.
+//
+// The comparison is strictly greater than the plan height. A halted node can have
+// the upgrade block in its block store (latest_block_height == plan height)
+// without the app having committed it, a block at plan height + 1 only exists once
+// the upgrade block was committed by the upgraded binary.
+//
+// An unreachable node proves nothing, a halted chain usually has its RPC down, so
+// the signal is then kept as is. Once proven past the plan the file is moved
 // rather than ignored, so a later RPC outage cannot bring it back to life.
 func (u *Upgrader) clearStaleSignal(ctx context.Context, snapshot Snapshot) Snapshot {
 	if u.config.HeightSource == nil || snapshot.UpgradeInfo == nil || snapshot.Plan == nil {
@@ -276,36 +294,76 @@ func (u *Upgrader) clearStaleSignal(ctx context.Context, snapshot Snapshot) Snap
 	height, err := u.config.HeightSource.LatestHeight(ctx)
 	if err != nil {
 		if tracer.Enabled() {
-			zlog.Debug("node height unavailable, trusting "+UpgradeInfoFile, zap.Error(err))
+			zlog.Debug("node height unavailable, keeping "+UpgradeInfoFile, zap.Error(err))
 		}
 		return snapshot
 	}
 
-	// A halted node has committed at most plan height - 1, the upgrade block is
-	// only ever committed by the upgraded binary.
 	if height <= snapshot.Plan.Height {
 		return snapshot
 	}
 
-	stalePath := filepath.Join(u.config.DataFolder, UpgradeInfoStale)
-	zlog.Warn("stale "+UpgradeInfoFile+" detected, node is already past the upgrade height, clearing it",
+	target, reason := UpgradeInfoStale, "node is already past the upgrade height, upgrade was applied out of band"
+	if snapshot.SignalApplied {
+		target, reason = UpgradeInfoApplied, "node committed the upgrade height"
+	}
+	targetPath := filepath.Join(u.config.DataFolder, target)
+
+	zlog.Info("clearing "+UpgradeInfoFile+", "+reason,
 		zap.String("upgrade_name", snapshot.Plan.Name),
 		zap.Int64("upgrade_height", snapshot.Plan.Height),
 		zap.Int64("node_height", height),
 		zap.Time("upgrade_info_modified", snapshot.UpgradeInfo.ModTime),
 		zap.String("from", snapshot.UpgradeInfo.Path),
-		zap.String("to", stalePath),
+		zap.String("to", targetPath),
 	)
 
-	if err := os.Rename(snapshot.UpgradeInfo.Path, stalePath); err != nil {
-		// Still known stale, so it is ignored for this evaluation and the rename
+	if err := os.Rename(snapshot.UpgradeInfo.Path, targetPath); err != nil {
+		// Still known past, so it is ignored for this evaluation and the rename
 		// is retried on the next one.
-		zlog.Error("could not clear stale "+UpgradeInfoFile+", ignoring it, rename it by hand", zap.Error(err))
+		zlog.Error("could not clear "+UpgradeInfoFile+", ignoring it, rename it by hand", zap.Error(err))
 		snapshot.UpgradeInfo, snapshot.Plan, snapshot.PlanParseErr = nil, nil, nil
 		return snapshot
 	}
 
-	return takeSnapshot(u.config.ChainFolder, u.config.DataFolder)
+	return u.takeSnapshot()
+}
+
+// takeSnapshot reads the disk and flags a signal whose plan was already applied.
+func (u *Upgrader) takeSnapshot() Snapshot {
+	snapshot := takeSnapshot(u.config.ChainFolder, u.config.DataFolder)
+	if snapshot.Plan != nil && u.isApplied(*snapshot.Plan) {
+		snapshot.SignalApplied = true
+	}
+
+	return snapshot
+}
+
+// isApplied reports whether the plan is the one this upgrader last swapped to. It
+// reads the marker from disk every time: that is what survives a restart, and
+// what lets an operator re-arm a plan by deleting upgrade-info.json-applied.
+func (u *Upgrader) isApplied(plan UpgradePlan) bool {
+	if marker, err := readUpgradePlan(filepath.Join(u.config.DataFolder, UpgradeInfoApplied)); err == nil && marker.sameUpgrade(plan) {
+		return true
+	}
+
+	return u.unpersistedApplied != nil && u.unpersistedApplied.sameUpgrade(plan)
+}
+
+// markApplied records the plan as applied on disk. If that fails it is kept in
+// memory so a failing disk write cannot cause the swap to run twice.
+func (u *Upgrader) markApplied(plan UpgradePlan) {
+	content, err := json.Marshal(plan)
+	if err == nil {
+		err = os.WriteFile(filepath.Join(u.config.DataFolder, UpgradeInfoApplied), content, 0644)
+	}
+	if err != nil {
+		u.unpersistedApplied = &plan
+		zlog.Error("could not record the applied plan on disk, it is only remembered until this process exits", zap.Error(err))
+		return
+	}
+
+	u.unpersistedApplied = nil
 }
 
 // deriveState layers retry bookkeeping on top of the disk-derived state so a
@@ -395,7 +453,7 @@ func (u *Upgrader) runUpgrade(ctx context.Context, snapshot Snapshot) {
 	}
 
 	previous := u.state
-	u.snapshot = takeSnapshot(u.config.ChainFolder, u.config.DataFolder)
+	u.snapshot = u.takeSnapshot()
 	u.state = u.deriveState(u.snapshot)
 	u.logStatus("upgrade_finished", previous)
 }
@@ -450,18 +508,16 @@ func (u *Upgrader) performUpgrade(ctx context.Context, snapshot Snapshot) error 
 		return fmt.Errorf("step 5/6 start containers: %w (%s)", err, u.rollback(ctx, currentPath, backupPath, nextPath))
 	}
 
-	// Clearing the signal is what prevents the now-stale upgrade-info.json from
-	// firing the next staged compose file the moment it is created. It is renamed
-	// rather than deleted so the applied plan stays on disk for inspection.
-	if snapshot.UpgradeInfo != nil {
-		appliedPath := filepath.Join(u.config.DataFolder, UpgradeInfoApplied)
-		zlog.Info("upgrade step 6/6: clearing upgrade signal",
-			zap.String("from", snapshot.UpgradeInfo.Path),
-			zap.String("to", appliedPath),
+	// upgrade-info.json is deliberately left in place: the new binary reads it at
+	// every boot, a restart before it commits the upgrade block needs it again.
+	// Remembering the plan keeps it from firing the next staged compose file, and
+	// clearStaleSignal moves the file once the node is past the plan height.
+	if snapshot.Plan != nil {
+		zlog.Info("upgrade step 6/6: recording applied plan, keeping "+UpgradeInfoFile+" for the new binary",
+			zap.String("upgrade_name", snapshot.Plan.Name),
+			zap.Int64("upgrade_height", snapshot.Plan.Height),
 		)
-		if err := os.Rename(snapshot.UpgradeInfo.Path, appliedPath); err != nil {
-			return fmt.Errorf("step 6/6 clear %s: %w (containers are up, clear it manually or the next staged compose file will upgrade immediately)", UpgradeInfoFile, err)
-		}
+		u.markApplied(*snapshot.Plan)
 	}
 
 	return nil
@@ -538,6 +594,7 @@ func (u *Upgrader) logStatus(reason string, previous State) {
 	if info := u.snapshot.UpgradeInfo; info != nil {
 		fields = append(fields,
 			zap.Bool("upgrade_info_present", true),
+			zap.Bool("upgrade_info_applied", u.snapshot.SignalApplied),
 			zap.Time("upgrade_info_modified", info.ModTime),
 		)
 		if plan := u.snapshot.Plan; plan != nil {

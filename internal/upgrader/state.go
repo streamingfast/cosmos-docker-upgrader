@@ -101,17 +101,28 @@ type Snapshot struct {
 	UpgradeInfo  *FileStat
 	Plan         *UpgradePlan
 	PlanParseErr error
+
+	// SignalApplied is set when UpgradeInfo holds a plan this upgrader already
+	// swapped to. The file is kept on disk for the new binary but is no longer a
+	// signal to act on.
+	SignalApplied bool
+}
+
+// ActiveSignal reports whether upgrade-info.json is present and still waiting
+// to be acted on.
+func (s Snapshot) ActiveSignal() bool {
+	return s.UpgradeInfo != nil && !s.SignalApplied
 }
 
 // State derives the state from the snapshot alone. Retry bookkeeping is layered
 // on top by the Upgrader, this only reports what the disk says.
 func (s Snapshot) State() State {
 	switch {
-	case s.ComposeNext != nil && s.UpgradeInfo != nil:
+	case s.ComposeNext != nil && s.ActiveSignal():
 		return StateUpgradeReady
 	case s.ComposeNext != nil:
 		return StateArmed
-	case s.UpgradeInfo != nil:
+	case s.ActiveSignal():
 		return StateBlocked
 	default:
 		return StateIdle
@@ -133,6 +144,13 @@ func takeSnapshot(chainFolder, dataFolder string) Snapshot {
 	}
 
 	return snapshot
+}
+
+// sameUpgrade tells whether two plans are the same upgrade. Name and height
+// together identify it, the height alone is unique per chain but the name guards
+// against a plan rewritten under the same height.
+func (p UpgradePlan) sameUpgrade(other UpgradePlan) bool {
+	return p.Name == other.Name && p.Height == other.Height
 }
 
 func statFile(path string) *FileStat {
